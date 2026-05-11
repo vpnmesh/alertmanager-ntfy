@@ -34,24 +34,11 @@ permissions:
 jobs:
   publish:
     name: Build and publish
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
 
     steps:
-      - name: Fix workspace permissions before checkout
-        run: |
-          echo "Workspace: $GITHUB_WORKSPACE"
-          if [[ -d "$GITHUB_WORKSPACE/.cache" ]]; then
-            if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-              sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.cache" || true
-              sudo rm -rf "$GITHUB_WORKSPACE/.cache" || true
-            else
-              chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.cache" || true
-              rm -rf "$GITHUB_WORKSPACE/.cache" || true
-            fi
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
