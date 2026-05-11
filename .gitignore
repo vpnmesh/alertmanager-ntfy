@@ -1,3 +1,6 @@
 config.yml
 auth.yml
 result
+build/
+dist/
+dist-local/

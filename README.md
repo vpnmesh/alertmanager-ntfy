@@ -1,5 +1,30 @@
 # alertmanager-ntfy [![build](https://github.com/alexbakker/alertmanager-ntfy/actions/workflows/build.yml/badge.svg)](https://github.com/alexbakker/alertmanager-ntfy/actions/workflows/build.yml)
 
+## VPNMesh fork release flow
+
+This fork publishes prebuilt Linux binaries for infrastructure roles that should
+not build Go projects on target hosts.
+
+Minimal release flow:
+
+1. Push a version tag, for example `v0.1.0`.
+2. GitHub Actions builds `alertmanager-ntfy-linux-amd64`.
+3. The workflow publishes the binary, `checksums.txt`, and `version.json` to
+  `s3://vpnmesh/third_party/{tag,latest}/` through the shared `S3_TARGETS`
+  secret.
+4. The same binary and checksum file are attached to the GitHub Release.
+
+The `S3_TARGETS` secret uses the same JSON shape as the other VPNMesh binary
+publishers. For this repository the target bucket should be `vpnmesh`; the
+workflow sets the path prefix to `third_party`.
+
+Local build and publish parity:
+
+```sh
+make release VERSION=0.1.0
+S3_TARGETS='[...]' make publish-s3-local VERSION=0.1.0
+```
+
 __alertmanager-ntfy__ is a service that forwards [Prometheus
 Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/)
 notifications to [ntfy.sh](https://ntfy.sh/). It is highly customizable,

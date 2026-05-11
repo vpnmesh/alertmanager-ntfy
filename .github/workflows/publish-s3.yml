@@ -1,0 +1,165 @@
+name: Publish alertmanager-ntfy to S3
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_override:
+        description: "Version tag, for example v0.1.0"
+        required: false
+        type: string
+      arch:
+        description: "Target architecture"
+        required: false
+        type: choice
+        options:
+          - amd64
+          - arm64
+        default: amd64
+      dry_run:
+        description: "Build only, skip S3 and GitHub Release"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish-alertmanager-ntfy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+    environment: production
+
+    steps:
+      - name: Fix workspace permissions before checkout
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          if [[ -d "$GITHUB_WORKSPACE/.cache" ]]; then
+            if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+              sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.cache" || true
+              sudo rm -rf "$GITHUB_WORKSPACE/.cache" || true
+            else
+              chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.cache" || true
+              rm -rf "$GITHUB_WORKSPACE/.cache" || true
+            fi
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Determine version
+        id: version
+        run: |
+          ARCH="${{ inputs.arch || 'amd64' }}"
+          if [[ -n "${{ inputs.tag_override }}" ]]; then
+            TAG="${{ inputs.tag_override }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "")
+            if [[ -z "$TAG" ]]; then
+              echo "::error::Not running from a tag and no v* tags found. Use tag_override input."
+              exit 1
+            fi
+          fi
+
+          VERSION="${TAG#v}"
+          BINARY="alertmanager-ntfy-linux-${ARCH}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "arch=${ARCH}" >> "$GITHUB_OUTPUT"
+          echo "binary=${BINARY}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build release files
+        run: |
+          make release \
+            VERSION=${{ steps.version.outputs.version }} \
+            VERSION_TAG=${{ steps.version.outputs.tag }} \
+            GOOS=linux \
+            GOARCH=${{ steps.version.outputs.arch }}
+
+      - name: Install AWS CLI and jq
+        if: ${{ !inputs.dry_run }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+          if ! command -v jq >/dev/null 2>&1 && [[ ! -x "$RUNNER_TEMP/bin/jq" ]]; then
+            curl -sL "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64" \
+              -o "$RUNNER_TEMP/bin/jq"
+            chmod +x "$RUNNER_TEMP/bin/jq"
+          fi
+
+          if ! command -v aws >/dev/null 2>&1; then
+            curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+              -o "$RUNNER_TEMP/awscliv2.zip"
+            unzip -q "$RUNNER_TEMP/awscliv2.zip" -d "$RUNNER_TEMP"
+            "$RUNNER_TEMP/aws/install" \
+              --install-dir "$RUNNER_TEMP/aws-cli" \
+              --bin-dir "$RUNNER_TEMP/bin"
+          fi
+
+          aws --version
+          jq --version
+
+      - name: Publish to S3
+        if: ${{ !inputs.dry_run }}
+        env:
+          S3_TARGETS: ${{ secrets.S3_TARGETS }}
+          VERSION_TAG: ${{ steps.version.outputs.tag }}
+          VERSION_NAME: ${{ steps.version.outputs.version }}
+          ARTIFACT_DIR: dist
+          PATH_PREFIX: third_party
+          PLATFORM_ARCH: ${{ steps.version.outputs.arch }}
+        run: bash scripts/upload-s3.sh
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: alertmanager-ntfy ${{ steps.version.outputs.version }} (${{ steps.version.outputs.arch }})
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, 'alpha') || contains(steps.version.outputs.tag, 'beta') || contains(steps.version.outputs.tag, 'rc') }}
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.version.outputs.binary }}
+            dist/checksums.txt
+
+      - name: Publish summary
+        if: always()
+        run: |
+          echo "## alertmanager-ntfy publish" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameter | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag | \`${{ steps.version.outputs.tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | \`${{ steps.version.outputs.version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Arch | \`${{ steps.version.outputs.arch }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| S3 prefix | \`third_party\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Files" >> "$GITHUB_STEP_SUMMARY"
+          for file in dist/*; do
+            echo "- \`$(basename "$file")\` ($(du -h "$file" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+          done
